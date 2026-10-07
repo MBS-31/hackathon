@@ -1,0 +1,210 @@
+# =============================================================================
+# docker-compose.yml — CRM Backend
+#
+# Currently running:
+#   - crm-api   (PHP 8.3 + Laravel)
+#   - crm-db    (PostgreSQL 16)
+#
+# Designed to add later (uncomment the relevant service blocks):
+#   - crm-redis     Redis cache/queue
+#   - crm-minio     MinIO object storage
+#   - crm-nestjs    NestJS microservice
+#   - crm-asterisk  Asterisk VoIP
+# =============================================================================
+
+
+# ---------------------------------------------------------------------------
+# Shared network — all services communicate on this internal network.
+# Additional services (Redis, MinIO, NestJS, Asterisk) simply join here.
+# ---------------------------------------------------------------------------
+networks:
+  crm_network:
+    driver: bridge
+    name: crm_network
+
+# ---------------------------------------------------------------------------
+# Named volumes — data persisted across container restarts
+# ---------------------------------------------------------------------------
+volumes:
+  crm_db_data:
+    name: crm_db_data
+  crm_storage:
+    name: crm_storage
+  # Uncomment when Redis is added:
+  # crm_redis_data:
+  #   name: crm_redis_data
+  # Uncomment when MinIO is added:
+  # crm_minio_data:
+  #   name: crm_minio_data
+
+# ---------------------------------------------------------------------------
+# Services
+# ---------------------------------------------------------------------------
+services:
+
+  # --------------------------------------------------------------------------
+  # PHP API — Laravel 11 / PHP 8.3
+  # --------------------------------------------------------------------------
+  crm-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+      args:
+        - BUILD_ENV=${APP_ENV:-local}
+    container_name: crm-api
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    environment:
+      APP_ENV:              ${APP_ENV:-local}
+      APP_KEY:              ${APP_KEY}
+      APP_URL:              ${APP_URL:-http://localhost:8000}
+      APP_DEBUG:            ${APP_DEBUG:-false}
+      APP_TIMEZONE:         ${APP_TIMEZONE:-UTC}
+      JWT_SECRET:           ${JWT_SECRET:-}
+
+      DB_CONNECTION:        pgsql
+      DB_HOST:              ${DATABASE_HOST:-crm-db}
+      DB_PORT:              ${DATABASE_PORT:-5432}
+      DB_DATABASE:          ${DATABASE_NAME:-crm}
+      DB_USERNAME:          ${DATABASE_USER:-crm_user}
+      DB_PASSWORD:          ${DATABASE_PASSWORD}
+
+      LOG_CHANNEL:          ${LOG_CHANNEL:-stderr}
+      LOG_LEVEL:            ${LOG_LEVEL:-debug}
+
+      # ---- Placeholders for future services ----
+      # REDIS_HOST:         crm-redis
+      # REDIS_PORT:         6379
+      # MINIO_ENDPOINT:     http://crm-minio:9000
+      # NESTJS_BASE_URL:    http://crm-nestjs:3000
+      # ASTERISK_HOST:      crm-asterisk
+
+    volumes:
+      - .:/var/www/html
+      - /var/www/html/vendor
+      - crm_storage:/var/www/html/storage/app
+    depends_on:
+      crm-db:
+        condition: service_healthy
+    networks:
+      - crm_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # --------------------------------------------------------------------------
+  # PostgreSQL 16
+  # --------------------------------------------------------------------------
+  crm-db:
+    image: postgres:16-alpine
+    container_name: crm-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       ${DATABASE_NAME:-crm}
+      POSTGRES_USER:     ${DATABASE_USER:-crm_user}
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD}
+      PGDATA:            /var/lib/postgresql/data/pgdata
+    ports:
+      - "${DATABASE_PORT_EXPOSED:-5432}:5432"
+    volumes:
+      - crm_db_data:/var/lib/postgresql/data
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - crm_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DATABASE_USER:-crm_user} -d ${DATABASE_NAME:-crm}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # ==========================================================================
+  # FUTURE SERVICES — Uncomment and configure when needed.
+  # All services are pre-wired to crm_network; no restructuring required.
+  # ==========================================================================
+
+  # --------------------------------------------------------------------------
+  # Redis — Cache, Queue, Sessions
+  # --------------------------------------------------------------------------
+  # crm-redis:
+  #   image: redis:7-alpine
+  #   container_name: crm-redis
+  #   restart: unless-stopped
+  #   command: redis-server --requirepass ${REDIS_PASSWORD}
+  #   ports:
+  #     - "${REDIS_PORT_EXPOSED:-6379}:6379"
+  #   volumes:
+  #     - crm_redis_data:/data
+  #   networks:
+  #     - crm_network
+  #   healthcheck:
+  #     test: ["CMD", "redis-cli", "ping"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
+
+  # --------------------------------------------------------------------------
+  # MinIO — S3-compatible object storage (documents, attachments)
+  # --------------------------------------------------------------------------
+  # crm-minio:
+  #   image: minio/minio:latest
+  #   container_name: crm-minio
+  #   restart: unless-stopped
+  #   command: server /data --console-address ":9001"
+  #   environment:
+  #     MINIO_ROOT_USER:     ${MINIO_ROOT_USER}
+  #     MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+  #   ports:
+  #     - "${MINIO_PORT:-9000}:9000"
+  #     - "${MINIO_CONSOLE_PORT:-9001}:9001"
+  #   volumes:
+  #     - crm_minio_data:/data
+  #   networks:
+  #     - crm_network
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+  #     interval: 30s
+  #     timeout: 10s
+  #     retries: 3
+
+  # --------------------------------------------------------------------------
+  # NestJS — Microservice / Event-driven workers
+  # --------------------------------------------------------------------------
+  # crm-nestjs:
+  #   build:
+  #     context: ./services/nestjs
+  #     dockerfile: Dockerfile
+  #   container_name: crm-nestjs
+  #   restart: unless-stopped
+  #   environment:
+  #     NODE_ENV:       ${APP_ENV:-production}
+  #     DATABASE_URL:   postgresql://${DATABASE_USER}:${DATABASE_PASSWORD}@crm-db:5432/${DATABASE_NAME}
+  #     REDIS_URL:      redis://:${REDIS_PASSWORD}@crm-redis:6379
+  #   ports:
+  #     - "${NESTJS_PORT:-3000}:3000"
+  #   depends_on:
+  #     - crm-db
+  #     - crm-redis
+  #   networks:
+  #     - crm_network
+
+  # --------------------------------------------------------------------------
+  # Asterisk — VoIP / telephony integration
+  # --------------------------------------------------------------------------
+  # crm-asterisk:
+  #   image: asterisk:latest
+  #   container_name: crm-asterisk
+  #   restart: unless-stopped
+  #   ports:
+  #     - "5060:5060/udp"   # SIP
+  #     - "5060:5060/tcp"   # SIP
+  #     - "10000-10100:10000-10100/udp"  # RTP
+  #   volumes:
+  #     - ./docker/asterisk/config:/etc/asterisk
+  #   networks:
+  #     - crm_network
